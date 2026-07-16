@@ -75,6 +75,21 @@ if arquivo:
             f"{dados['periodo']['inicio']} até {dados['periodo']['fim']}"
         )
 
+        datas = sorted({
+            m.date()
+            for funcionario in pagamentos
+            for m in funcionario["marcacoes"]
+        })
+
+        periodo_geral = st.select_slider(
+            "Período Geral",
+            options=datas,
+            value=(datas[0], datas[-1]),
+            format_func=lambda d: d.strftime("%d/%m/%Y")
+        )
+
+        inicio_geral, fim_geral = periodo_geral
+
         pesquisa = st.text_input(
             "Pesquisar funcionário"
         )
@@ -90,22 +105,30 @@ if arquivo:
         if not funcionario["marcacoes"]:
             continue
 
+        # Marcações respeitando o filtro geral (dias)
+        marcacoes = [
+            m
+            for m in funcionario["marcacoes"]
+            if inicio_geral <= m.date() <= fim_geral
+        ]
+
+        # Se não houver marcações no período, pula o funcionário
+        if not marcacoes:
+            continue
+
         with st.container(border=True):
 
             st.subheader(f"👤 {funcionario['nome_exibicao']}")
 
-            marcacoes = funcionario["marcacoes"]
-
+            # Slider individual (data e hora)
             if len(marcacoes) == 1:
 
-                periodo = (
-                    marcacoes[0],
-                    marcacoes[0]
-                )
+                inicio = marcacoes[0]
+                fim = marcacoes[0]
 
             else:
 
-                periodo = st.select_slider(
+                inicio, fim = st.select_slider(
                     "Período",
                     options=marcacoes,
                     value=(
@@ -113,10 +136,8 @@ if arquivo:
                         marcacoes[-1]
                     ),
                     format_func=lambda dt: dt.strftime("%d/%m/%Y %H:%M"),
-                    key=f"slider_{funcionario['id']}"
+                    key=f"slider_{funcionario['id']}_{inicio_geral}_{fim_geral}"
                 )
-
-            inicio, fim = periodo
 
             marcacoes_filtradas = [
                 m
@@ -129,8 +150,8 @@ if arquivo:
             )
 
             total = sum(
-                j["valor"]
-                for j in jornadas
+                jornada["valor"]
+                for jornada in jornadas
             )
 
             pix = PIX.get(
@@ -141,7 +162,7 @@ if arquivo:
             col_pix, col_valor = st.columns([3, 1])
 
             with col_pix:
-                st.write(f"**PIX:** `{pix}`")
+                st.markdown(f"#### **PIX:** `{pix}`")
 
             with col_valor:
                 st.metric(
@@ -175,10 +196,4 @@ if arquivo:
                     pd.DataFrame(tabela),
                     use_container_width=True,
                     hide_index=True
-                )
-
-            else:
-
-                st.info(
-                    "Nenhuma jornada encontrada para o período selecionado."
                 )
