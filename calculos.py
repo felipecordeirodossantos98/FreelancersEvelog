@@ -1,9 +1,27 @@
 from datetime import datetime, time
 
-VALOR_ATE_9H = 100
-VALOR_ACIMA_9H = 200
+VALOR_ATE_9H = 110
+VALOR_ACIMA_9H = 220
 LIMITE_HORAS = 9
+LIMITE_DUPLICIDADE_MINUTOS = 10
 
+def remover_duplicidades(marcacoes):
+
+    if not marcacoes:
+        return []
+
+    resultado = [marcacoes[0]]
+
+    for marcacao in marcacoes[1:]:
+
+        diferenca = (
+            marcacao - resultado[-1]
+        ).total_seconds() / 60
+
+        if diferenca >= LIMITE_DUPLICIDADE_MINUTOS:
+            resultado.append(marcacao)
+
+    return resultado
 
 def formatar_horas(horas_decimais):
 
@@ -68,11 +86,11 @@ def calcular_jornadas(marcacoes):
 
     return jornadas
 
-
 def calcular_pagamentos(dados):
 
     funcionarios = {}
 
+    # Junta todas as marcações por funcionário
     for dia in dados["dias"].values():
 
         data = dia["data"]
@@ -97,18 +115,26 @@ def calcular_pagamentos(dados):
 
     resultado = []
 
+    # Calcula jornadas
     for funcionario in funcionarios.values():
 
+        # Ordena cronologicamente
         funcionario["marcacoes"].sort()
 
-        jornadas = calcular_jornadas(
+        # Remove marcações duplicadas
+        marcacoes = remover_duplicidades(
             funcionario["marcacoes"]
+        )
+
+        jornadas = calcular_jornadas(
+            marcacoes
         )
 
         resultado.append({
             "id": funcionario["id"],
-            "nome": funcionario["nome"],
-            "marcacoes": funcionario["marcacoes"],
+            "nome": funcionario["nome"],  # original
+            "nome_exibicao": funcionario["nome"].title(),
+            "marcacoes": marcacoes,
             "jornadas": jornadas,
             "total": sum(
                 j["valor"]
@@ -117,7 +143,7 @@ def calcular_pagamentos(dados):
         })
 
     resultado.sort(
-        key=lambda x: x["nome"]
+        key=lambda x: x["nome_exibicao"]
     )
 
     return resultado
