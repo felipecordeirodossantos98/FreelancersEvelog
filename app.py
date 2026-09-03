@@ -11,7 +11,8 @@ from calculos import (
 from componentes import exibir_marcacoes
 
 st.set_page_config(
-    page_title="Controle de Pagamento de Freelancers",
+    page_title="Freelancers Evelog",
+    page_icon="images/evelog-favicon.svg",
     layout="wide"
 )
 
@@ -57,7 +58,7 @@ PIX = {
     "vitoria caroline": "73981762804",
 }
 
-st.title("Controle de Pagamento de Freelancers")
+st.title("Freelancers Evelog")
 
 col1, _ = st.columns([1, 2])
 
