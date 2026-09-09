@@ -10,6 +10,20 @@ from calculos import (
 )
 from componentes import exibir_marcacoes
 
+import streamlit.components.v1 as components
+
+components.html(
+    """
+    <script>
+        window.parent.addEventListener("beforeunload", function (event) {
+            event.preventDefault();
+            event.returnValue = "";
+        });
+    </script>
+    """,
+    height=0,
+)
+
 st.set_page_config(
     page_title="Freelancers Evelog",
     page_icon="images/evelog-favicon.svg",
