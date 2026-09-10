@@ -1,4 +1,4 @@
-from datetime import datetime
+from datetime import datetime, time
 
 import pandas as pd
 import streamlit as st
@@ -6,9 +6,19 @@ import streamlit as st
 from parser import montar_objeto
 from calculos import (
     calcular_pagamentos,
-    calcular_jornadas
+    calcular_jornadas,
+    calcular_periodo_pagamento,
+    DIA_PAGAMENTO,
+    ROTULO_DIA_PAGAMENTO
 )
 from componentes import exibir_marcacoes
+from exportacao import gerar_planilha_presenca
+
+st.set_page_config(
+    page_title="Freelancers Evelog",
+    page_icon="images/evelog-favicon.svg",
+    layout="wide"
+)
 
 import streamlit.components.v1 as components
 
@@ -22,12 +32,6 @@ components.html(
     </script>
     """,
     height=0,
-)
-
-st.set_page_config(
-    page_title="Freelancers Evelog",
-    page_icon="images/evelog-favicon.svg",
-    layout="wide"
 )
 
 # Marcações adicionadas manualmente
@@ -87,7 +91,22 @@ if arquivo:
 
     dados = montar_objeto(arquivo)
 
-    pagamentos = calcular_pagamentos(dados)
+    # O período automático usa a data final informada pelo próprio
+    # relatório. Assim também funciona ao consultar arquivos antigos.
+    data_referencia_relatorio = datetime.strptime(
+        dados["periodo"]["fim"],
+        "%Y-%m-%d"
+    ).date()
+
+    inicio_pagamento, fim_pagamento = calcular_periodo_pagamento(
+        data_referencia_relatorio
+    )
+
+    pagamentos = calcular_pagamentos(
+        dados,
+        data_inicio_pagamento=inicio_pagamento,
+        data_fim_pagamento=fim_pagamento,
+    )
 
     col2, _ = st.columns([1, 2])
 
@@ -103,17 +122,76 @@ if arquivo:
             for m in funcionario["marcacoes"]
         })
 
-        periodo_geral = st.select_slider(
-            "Período Geral",
-            options=datas,
-            value=(datas[0], datas[-1]),
-            format_func=lambda d: d.strftime("%d/%m/%Y")
+        periodo_livre = st.toggle(
+            "Período livre",
+            value=False,
+            help=(
+                "Desativado: usa automaticamente o período de pagamento. "
+                "Ativado: libera os filtros como eram antes."
+            )
         )
 
-        inicio_geral, fim_geral = periodo_geral
+        if periodo_livre:
+
+            periodo_geral = st.select_slider(
+                "Período Geral",
+                options=datas,
+                value=(datas[0], datas[-1]),
+                format_func=lambda d: d.strftime("%d/%m/%Y")
+            )
+
+            inicio_geral, fim_geral = periodo_geral
+
+        else:
+
+            inicio_geral = inicio_pagamento
+            fim_geral = fim_pagamento
+
+            st.success(
+                f"Período de pagamento ({DIA_PAGAMENTO}): "
+                f"{inicio_geral.strftime('%d/%m/%Y')} até "
+                f"{fim_geral.strftime('%d/%m/%Y')}"
+            )
 
         pesquisa = st.text_input(
             "Pesquisar funcionário"
+        )
+
+        # ==================================================
+        # EXPORTAR FOLHA DE PRESENÇA
+        # ==================================================
+
+        arquivo_presenca, quantidade_ativos = gerar_planilha_presenca(
+            pagamentos=pagamentos,
+            marcacoes_manuais=st.session_state["marcacoes_manuais"],
+            periodo_origem=dados["periodo"],
+            inicio_periodo=inicio_geral,
+            fim_periodo=fim_geral,
+        )
+
+        st.download_button(
+            "Baixar folha de presença",
+            data=arquivo_presenca,
+            file_name=(
+                "presenca_"
+                f"{inicio_geral.strftime('%Y-%m-%d')}_a_"
+                f"{fim_geral.strftime('%Y-%m-%d')}.xlsx"
+            ),
+            mime=(
+                "application/vnd.openxmlformats-officedocument."
+                "spreadsheetml.sheet"
+            ),
+            use_container_width=True,
+            help=(
+                f"Gera a planilha para impressão com {quantidade_ativos} "
+                "funcionário(s) que possuem marcações no período. "
+                "Marcações adicionadas manualmente aparecem em verde."
+            ),
+        )
+
+        st.caption(
+            f"Folha de presença: {quantidade_ativos} funcionário(s) ativo(s) "
+            "no período. Correções manuais serão destacadas em verde."
         )
 
     for funcionario in pagamentos:
@@ -186,9 +264,23 @@ if arquivo:
             # CHAVES DO SLIDER INDIVIDUAL
             # ==================================================
 
-            chave_slider = (
+            chave_slider_base = (
                 f"slider_{funcionario['id']}_"
                 f"{inicio_geral}_{fim_geral}"
+            )
+
+            # O select_slider mantém estado próprio no navegador. A versão
+            # faz com que uma correção que amplie o período gere um widget
+            # novo no rerun, garantindo que o ponteiro acompanhe o horário
+            # recém-adicionado em vez de restaurar o limite antigo.
+            chave_slider_versao = f"{chave_slider_base}_versao"
+
+            if chave_slider_versao not in st.session_state:
+                st.session_state[chave_slider_versao] = 0
+
+            chave_slider = (
+                f"{chave_slider_base}_"
+                f"v{st.session_state[chave_slider_versao]}"
             )
 
             chave_periodo_salvo = (
@@ -258,6 +350,55 @@ if arquivo:
 
                     marcacoes_manuais_funcionario.sort()
 
+                    # No período livre, faz o slider individual acompanhar
+                    # automaticamente uma correção adicionada fora dos
+                    # limites atuais. Se a nova marcação já estiver dentro
+                    # do intervalo selecionado, preserva o filtro do usuário.
+                    if periodo_livre:
+
+                        periodo_atual = st.session_state.get(
+                            chave_periodo_salvo
+                        )
+
+                        if periodo_atual:
+                            inicio_atual, fim_atual = periodo_atual
+
+                            novo_inicio = min(
+                                inicio_atual,
+                                nova_marcacao
+                            )
+                            novo_fim = max(
+                                fim_atual,
+                                nova_marcacao
+                            )
+
+                            if (
+                                novo_inicio != inicio_atual
+                                or novo_fim != fim_atual
+                            ):
+                                st.session_state[
+                                    chave_periodo_salvo
+                                ] = (
+                                    novo_inicio,
+                                    novo_fim
+                                )
+
+                                # Força a criação de uma nova instância
+                                # visual do slider no próximo rerun. Só fazemos
+                                # isso quando a correção realmente ficou fora
+                                # do intervalo atual; se estiver dentro, o
+                                # filtro escolhido pelo usuário é preservado.
+                                st.session_state[
+                                    chave_slider_versao
+                                ] += 1
+
+                                # Limpa o estado da versão antiga para não
+                                # acumular chaves de widgets na sessão.
+                                st.session_state.pop(
+                                    chave_slider,
+                                    None
+                                )
+
                     st.rerun()
 
             # ==================================================
@@ -274,10 +415,30 @@ if arquivo:
             else:
 
                 # ==================================================
-                # SLIDER INDIVIDUAL
+                # PERÍODO INDIVIDUAL
                 # ==================================================
 
-                if len(marcacoes) == 1:
+                if not periodo_livre:
+
+                    # No modo padrão, o período é fixo pelo ciclo de
+                    # pagamento. O usuário não precisa ajustar funcionário
+                    # por funcionário.
+                    inicio = datetime.combine(
+                        inicio_pagamento,
+                        time.min
+                    )
+                    fim = datetime.combine(
+                        fim_pagamento,
+                        time.max
+                    )
+
+                    st.caption(
+                        "Período de pagamento: "
+                        f"{inicio_pagamento.strftime('%d/%m/%Y')} até "
+                        f"{fim_pagamento.strftime('%d/%m/%Y')}"
+                    )
+
+                elif len(marcacoes) == 1:
 
                     inicio = marcacoes[0]
                     fim = marcacoes[0]
@@ -296,6 +457,7 @@ if arquivo:
 
                 else:
 
+                    # Período livre: mantém exatamente o slider antigo.
                     periodo_padrao = (
                         marcacoes[0],
                         marcacoes[-1]
@@ -365,9 +527,52 @@ if arquivo:
                 # CALCULAR JORNADAS
                 # ==================================================
 
-                jornadas = calcular_jornadas(
-                    marcacoes_filtradas
-                )
+                # A regra financeira é calculada usando TODAS as
+                # marcações disponíveis do funcionário. O slider abaixo
+                # funciona somente como filtro de exibição e do total,
+                # sem alterar se uma jornada é normal, dobrada,
+                # complemento ou adiantamento.
+                if periodo_livre:
+                    # No modo livre, mantém o cálculo antigo das jornadas
+                    # completas. A única regra adicional é que qualquer
+                    # dia com exatamente uma marcação vale R$ 110 como
+                    # adiantamento.
+                    jornadas_calculadas = calcular_jornadas(
+                        todas_marcacoes,
+                        adiantamento_em_qualquer_dia=True,
+                    )
+                else:
+                    # No modo de pagamento, aplica a regra especial do
+                    # ciclo configurado (por padrão, quinta a quinta).
+                    jornadas_calculadas = calcular_jornadas(
+                        todas_marcacoes,
+                        data_inicio_pagamento=inicio_pagamento,
+                        data_fim_pagamento=fim_pagamento,
+                    )
+
+                # Mantém no resultado apenas jornadas inteiramente dentro
+                # do período individual selecionado. Para o adiantamento,
+                # que não possui saída, basta a entrada estar no período.
+                jornadas = []
+
+                for jornada in jornadas_calculadas:
+
+                    entrada_jornada = jornada.get("entrada")
+                    saida_jornada = jornada.get("saida")
+
+                    if entrada_jornada is None:
+                        continue
+
+                    if not (inicio <= entrada_jornada <= fim):
+                        continue
+
+                    if (
+                        saida_jornada is not None
+                        and not (inicio <= saida_jornada <= fim)
+                    ):
+                        continue
+
+                    jornadas.append(jornada)
 
                 total = sum(
                     jornada.get("valor", 0)
@@ -426,6 +631,48 @@ if arquivo:
 
                     entrada = jornada.get("entrada")
                     saida = jornada.get("saida")
+                    tipo = jornada.get("tipo", "")
+                    valor = jornada.get("valor", 0)
+
+                    if tipo == "normal":
+                        tipo_exibicao = "Normal"
+                        valor_exibicao = f"R$ {valor:.2f}"
+
+                    elif tipo == "dobrada":
+                        tipo_exibicao = "Dobrada"
+                        valor_exibicao = f"R$ {valor:.2f}"
+
+                    elif tipo == "dobrada_complemento_pagamento":
+                        tipo_exibicao = (
+                            "Dobrada — complemento "
+                            f"{ROTULO_DIA_PAGAMENTO}"
+                        )
+                        valor_exibicao = f"+ R$ {valor:.2f}"
+
+                    elif tipo == "normal_ja_pago_pagamento":
+                        tipo_exibicao = (
+                            "Normal — já pago "
+                            f"{ROTULO_DIA_PAGAMENTO} anterior"
+                        )
+                        valor_exibicao = f"R$ {valor:.2f}"
+
+                    elif tipo == "adiantamento_dia_pagamento":
+                        tipo_exibicao = (
+                            "Adiantamento "
+                            f"{ROTULO_DIA_PAGAMENTO}"
+                        )
+                        valor_exibicao = f"R$ {valor:.2f}"
+
+                    elif tipo in {
+                        "adiantamento_periodo_livre",
+                        "adiantamento_marcacao_unica",
+                    }:
+                        tipo_exibicao = "Adiantamento"
+                        valor_exibicao = f"R$ {valor:.2f}"
+
+                    else:
+                        tipo_exibicao = ""
+                        valor_exibicao = f"R$ {valor:.2f}"
 
                     tabela.append(
                         {
@@ -450,10 +697,9 @@ if arquivo:
                                 ""
                             ),
 
-                            "Valor": (
-                                f"R$ "
-                                f"{jornada.get('valor', 0):.2f}"
-                            )
+                            "Tipo": tipo_exibicao,
+
+                            "Valor": valor_exibicao
                         }
                     )
 
