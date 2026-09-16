@@ -1,9 +1,10 @@
 from collections import defaultdict
 from datetime import datetime, time, timedelta
 
-VALOR_ATE_9H = 110
-VALOR_ACIMA_9H = 220
-LIMITE_HORAS = 9
+VALOR_DIARIA = 110.00
+HORAS_DIARIA = 8
+VALOR_HORA_EXTRA = 13.75
+TOLERANCIA_HORA_EXTRA_MINUTOS = 5
 LIMITE_DUPLICIDADE_MINUTOS = 10
 
 # ==============================================================
@@ -145,6 +146,29 @@ def calcular_periodo_pagamento(data_referencia):
     return inicio, fim
 
 
+def _calcular_horas_extras(horas_trabalhadas):
+    """
+    Retorna as horas extras inteiras acima de 8h, com tolerância
+    de 5 minutos para completar cada hora extra.
+
+    Exemplos:
+    - 8h54 -> 0h extra
+    - 8h55 -> 1h extra
+    - 9h54 -> 1h extra
+    - 9h55 -> 2h extras
+    """
+
+    minutos_trabalhados = round(horas_trabalhadas * 60)
+    minutos_excedentes = minutos_trabalhados - (HORAS_DIARIA * 60)
+
+    if minutos_excedentes <= 0:
+        return 0
+
+    return max(
+        0,
+        (minutos_excedentes + TOLERANCIA_HORA_EXTRA_MINUTOS) // 60
+    )
+
 def _adicionar_jornada_completa(
     jornadas,
     entrada,
@@ -154,67 +178,76 @@ def _adicionar_jornada_completa(
 ):
     horas = (saida - entrada).total_seconds() / 3600
 
-    valor_original = (
-        VALOR_ATE_9H
-        if horas <= LIMITE_HORAS
-        else VALOR_ACIMA_9H
+    horas_extras = _calcular_horas_extras(horas)
+    valor_horas_extras = round(
+        horas_extras * VALOR_HORA_EXTRA,
+        2
+    )
+
+    valor_original = round(
+        VALOR_DIARIA + valor_horas_extras,
+        2
     )
 
     valor = valor_original
     tipo = (
-        "normal"
-        if horas <= LIMITE_HORAS
-        else "dobrada"
+        "diaria_com_horas_extras"
+        if horas_extras > 0
+        else "diaria"
     )
 
-    # Somente a PRIMEIRA data do ciclo de pagamento representa a
-    # quinta anterior, cujo R$ 110 já foi pago no próprio dia.
+    # Somente a PRIMEIRA data do ciclo de pagamento representa o
+    # dia de pagamento anterior, cuja diária de R$ 110 já foi paga
+    # no próprio dia. No fechamento atual entram apenas as horas
+    # extras completas que foram confirmadas depois.
     if (
         aplicar_ajuste_inicio
         and data_inicio_pagamento is not None
         and entrada.date() == data_inicio_pagamento
     ):
-        valor = max(
-            valor_original - VALOR_ATE_9H,
-            0
-        )
+        valor = valor_horas_extras
 
-        if valor_original > VALOR_ATE_9H:
-            tipo = "dobrada_complemento_pagamento"
+        if horas_extras > 0:
+            tipo = "horas_extras_complemento_pagamento"
         else:
-            tipo = "normal_ja_pago_pagamento"
+            tipo = "diaria_ja_paga_pagamento"
 
     jornadas.append({
         "entrada": entrada,
         "saida": saida,
         "horas_decimal": horas,
         "horas": formatar_horas(horas),
+        "horas_extras": horas_extras,
+        "valor_hora_extra": VALOR_HORA_EXTRA,
+        "valor_horas_extras": valor_horas_extras,
+        "valor_diaria": VALOR_DIARIA,
         "valor": valor,
         "tipo": tipo
     })
-
 
 def calcular_jornadas(
     marcacoes,
     data_inicio_pagamento=None,
     data_fim_pagamento=None,
-    adiantamento_em_qualquer_dia=False,
 ):
     """
-    Calcula as jornadas e, quando o ciclo de pagamento é informado,
-    aplica as regras especiais somente nas bordas desse ciclo.
+    Monta uma única jornada por dia usando a PRIMEIRA e a ÚLTIMA
+    marcação do dia. Marcações intermediárias continuam visíveis, mas
+    não quebram a jornada em vários pares.
 
-    Regras do ciclo:
-    - no primeiro dia do ciclo (dia de pagamento anterior):
-      jornada normal = R$ 0; jornada dobrada = + R$ 110;
-    - no modo automático, qualquer dia DENTRO do ciclo com exatamente
-      UMA marcação gera um adiantamento de R$ 110;
-    - se essa marcação única estiver no último DIA_PAGAMENTO do ciclo,
-      ela recebe a identificação específica de adiantamento do pagamento;
-    - no Período livre, quando adiantamento_em_qualquer_dia=True,
-      qualquer dia com exatamente UMA marcação também gera um
-      adiantamento de R$ 110, independentemente do dia da semana;
-    - o filtro visual não altera as classificações das jornadas completas.
+    Regras:
+    - diária de R$ 110;
+    - após 8h, cada hora extra vale R$ 13,75;
+    - existe tolerância de 5 minutos para completar a hora extra
+      (8h55 já conta 1h extra, 9h55 conta 2h, etc.);
+    - no primeiro dia do ciclo, a diária já foi paga e entram somente
+      as horas extras confirmadas;
+    - na quinta final do ciclo, somente a primeira marcação gera o
+      adiantamento de R$ 110, mesmo que existam outras marcações;
+    - nos demais dias, exatamente uma marcação dentro do ciclo gera
+      adiantamento de R$ 110;
+    - fora da quinta final, duas ou mais marcações no mesmo dia formam
+      uma jornada da primeira até a última marcação daquele dia.
     """
 
     marcacoes = remover_duplicidades(marcacoes)
@@ -235,20 +268,7 @@ def calcular_jornadas(
         marcacoes_por_dia[marcacao.date()].append(marcacao)
 
     for data in sorted(marcacoes_por_dia):
-
         marcacoes_dia = sorted(marcacoes_por_dia[data])
-
-        # Uma única marcação vale R$ 110 como adiantamento nos dois
-        # modos. No automático ela precisa estar dentro do ciclo de
-        # pagamento; no Período livre pode ser qualquer dia selecionado.
-        eh_dia_pagamento = (
-            data.weekday() == DIA_PAGAMENTO_NUMERO
-        )
-
-        eh_fim_do_ciclo = (
-            data_fim_pagamento is not None
-            and data == data_fim_pagamento
-        )
 
         dentro_ciclo_pagamento = (
             data_inicio_pagamento is not None
@@ -256,73 +276,71 @@ def calcular_jornadas(
             and data_inicio_pagamento <= data <= data_fim_pagamento
         )
 
-        deve_adiantar_livre = (
-            len(marcacoes_dia) == 1
-            and adiantamento_em_qualquer_dia
+        eh_dia_pagamento = data.weekday() == DIA_PAGAMENTO_NUMERO
+        eh_fim_do_ciclo = (
+            data_fim_pagamento is not None
+            and data == data_fim_pagamento
         )
 
-        deve_adiantar_automatico = (
-            len(marcacoes_dia) == 1
-            and not adiantamento_em_qualquer_dia
-            and dentro_ciclo_pagamento
-        )
+        # Na quinta ATUAL do pagamento, a diária é adiantada no momento
+        # da primeira marcação. Mesmo que a saída (ou outras marcações) já
+        # esteja presente no relatório, ela NÃO entra no pagamento atual.
+        # A jornada completa dessa quinta será apurada no próximo ciclo,
+        # quando esta data passar a ser a quinta inicial; nesse momento,
+        # entram apenas as horas extras pendentes, pois a diária já foi paga.
+        if dentro_ciclo_pagamento and eh_dia_pagamento and eh_fim_do_ciclo:
+            jornadas.append({
+                "entrada": marcacoes_dia[0],
+                "saida": None,
+                "horas_decimal": None,
+                "horas": "",
+                "horas_extras": 0,
+                "valor_hora_extra": VALOR_HORA_EXTRA,
+                "valor_horas_extras": 0.0,
+                "valor_diaria": VALOR_DIARIA,
+                "valor": VALOR_DIARIA,
+                "tipo": "adiantamento_dia_pagamento"
+            })
+            continue
 
-        if deve_adiantar_livre or deve_adiantar_automatico:
-            if deve_adiantar_livre:
-                tipo_adiantamento = "adiantamento_periodo_livre"
-            elif eh_dia_pagamento and eh_fim_do_ciclo:
-                tipo_adiantamento = "adiantamento_dia_pagamento"
-            else:
-                tipo_adiantamento = "adiantamento_marcacao_unica"
+        if len(marcacoes_dia) == 1:
+            if not dentro_ciclo_pagamento:
+                continue
 
             jornadas.append({
                 "entrada": marcacoes_dia[0],
                 "saida": None,
                 "horas_decimal": None,
                 "horas": "",
-                "valor": VALOR_ATE_9H,
-                "tipo": tipo_adiantamento
+                "horas_extras": 0,
+                "valor_hora_extra": VALOR_HORA_EXTRA,
+                "valor_horas_extras": 0.0,
+                "valor_diaria": VALOR_DIARIA,
+                "valor": VALOR_DIARIA,
+                "tipo": "adiantamento_marcacao_unica"
             })
             continue
 
-        # Jornada é formada dentro do próprio dia. Isso garante que
-        # uma sexta-feira com apenas uma marcação não seja pareada com
-        # a primeira marcação do sábado seguinte.
-        i = 0
-        primeira_jornada_do_dia = True
+        # A jornada do dia vai da primeira à última marcação.
+        entrada = marcacoes_dia[0]
+        saida = marcacoes_dia[-1]
 
-        while i + 1 < len(marcacoes_dia):
+        aplicar_ajuste_inicio = (
+            data_inicio_pagamento is not None
+            and data == data_inicio_pagamento
+            and data.weekday() == DIA_PAGAMENTO_NUMERO
+        )
 
-            entrada = marcacoes_dia[i]
-            saida = marcacoes_dia[i + 1]
+        _adicionar_jornada_completa(
+            jornadas=jornadas,
+            entrada=entrada,
+            saida=saida,
+            data_inicio_pagamento=data_inicio_pagamento,
+            aplicar_ajuste_inicio=aplicar_ajuste_inicio,
+        )
 
-            aplicar_ajuste_inicio = (
-                primeira_jornada_do_dia
-                and data_inicio_pagamento is not None
-                and data == data_inicio_pagamento
-                and data.weekday() == DIA_PAGAMENTO_NUMERO
-            )
-
-            _adicionar_jornada_completa(
-                jornadas=jornadas,
-                entrada=entrada,
-                saida=saida,
-                data_inicio_pagamento=data_inicio_pagamento,
-                aplicar_ajuste_inicio=aplicar_ajuste_inicio,
-            )
-
-            primeira_jornada_do_dia = False
-            i += 2
-
-        # Se o dia tiver mais de uma marcação e ainda sobrar uma ao
-        # final do pareamento, essa sobra continua sendo ignorada.
-
-    jornadas.sort(
-        key=lambda jornada: jornada["entrada"]
-    )
-
+    jornadas.sort(key=lambda jornada: jornada["entrada"])
     return jornadas
-
 
 def calcular_pagamentos(
     dados,
