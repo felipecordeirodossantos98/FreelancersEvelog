@@ -7,8 +7,10 @@ from parser import montar_objeto
 from calculos import (
     calcular_pagamentos,
     calcular_jornadas,
-    calcular_periodo_pagamento,
+    listar_dias_pagamento_no_periodo,
+    listar_ciclos_pagamento_no_periodo,
     DIA_PAGAMENTO,
+    NOME_DIA_PAGAMENTO,
     ROTULO_DIA_PAGAMENTO
 )
 from componentes import exibir_marcacoes
@@ -37,6 +39,7 @@ components.html(
 # Marcações adicionadas manualmente
 if "marcacoes_manuais" not in st.session_state:
     st.session_state["marcacoes_manuais"] = {}
+
 
 PIX = {
     "agda munhoz": "11914713728",
@@ -78,6 +81,27 @@ PIX = {
 
 st.title("Freelancers Evelog")
 
+# Ajustes visuais dos botões. O download fica compacto, sem ocupar
+# toda a coluna, e com o texto em vermelho.
+st.markdown(
+    """
+    <style>
+    div[data-testid="stDownloadButton"] > button {
+        width: auto !important;
+        min-width: 0 !important;
+        color: #ff4b4b !important;
+        padding-left: 0.75rem !important;
+        padding-right: 0.75rem !important;
+        white-space: nowrap !important;
+    }
+    div[data-testid="stDownloadButton"] > button * {
+        color: white !important;
+    }
+    </style>
+    """,
+    unsafe_allow_html=True,
+)
+
 col1, _ = st.columns([1, 2])
 
 with col1:
@@ -92,24 +116,60 @@ if arquivo:
 
     dados = montar_objeto(arquivo)
 
-    # O período é sempre o ciclo de pagamento configurado.
-    data_referencia_relatorio = datetime.strptime(
+    data_inicio_base = datetime.strptime(
+        dados["periodo"]["inicio"],
+        "%Y-%m-%d"
+    ).date()
+
+    data_fim_base = datetime.strptime(
         dados["periodo"]["fim"],
         "%Y-%m-%d"
     ).date()
 
-    inicio_pagamento, fim_pagamento = calcular_periodo_pagamento(
-        data_referencia_relatorio
+    # O filtro trabalha somente com ciclos que começam no dia
+    # configurado em DIA_PAGAMENTO. Dias anteriores ao primeiro
+    # dia de pagamento existente na base são ignorados.
+    dias_pagamento = listar_dias_pagamento_no_periodo(
+        data_inicio_base,
+        data_fim_base,
     )
 
-    inicio_geral = inicio_pagamento
-    fim_geral = fim_pagamento
+    if not dias_pagamento:
+        st.warning(
+            f"A planilha não possui nenhuma {DIA_PAGAMENTO} "
+            "dentro do período informado."
+        )
+        st.stop()
 
-    pagamentos = calcular_pagamentos(
-        dados,
-        data_inicio_pagamento=inicio_pagamento,
-        data_fim_pagamento=fim_pagamento,
+    ciclos_pagamento = listar_ciclos_pagamento_no_periodo(
+        data_inicio_base,
+        data_fim_base,
     )
+
+    if not ciclos_pagamento:
+        st.warning(
+            f"A base possui {NOME_DIA_PAGAMENTO.lower()}, mas não há "
+            "dias suficientes depois dela para formar um período de pagamento."
+        )
+        st.stop()
+
+    # Cada opção representa um ciclo completo. O usuário escolhe o
+    # período como uma única unidade, sem pontos inicial/final separados.
+    chave_ciclo = (
+        "ciclo_segmentado_"
+        f"{DIA_PAGAMENTO}_"
+        f"{dados['periodo']['inicio']}_"
+        f"{dados['periodo']['fim']}"
+    )
+
+    indice_ciclo_padrao = len(ciclos_pagamento) - 1
+
+    if (
+        chave_ciclo not in st.session_state
+        or not isinstance(st.session_state[chave_ciclo], int)
+        or not 0 <= st.session_state[chave_ciclo] < len(ciclos_pagamento)
+    ):
+        st.session_state[chave_ciclo] = indice_ciclo_padrao
 
     col2, _ = st.columns([1, 2])
 
@@ -118,14 +178,39 @@ if arquivo:
             f"{dados['periodo']['inicio']} até {dados['periodo']['fim']}"
         )
 
+        indice_ciclo = st.segmented_control(
+            "Período de pagamento",
+            options=list(range(len(ciclos_pagamento))),
+            selection_mode="single",
+            required=True,
+            key=chave_ciclo,
+            format_func=lambda indice: (
+                f"{ciclos_pagamento[indice][0].strftime('%d/%m')} → "
+                f"{ciclos_pagamento[indice][1].strftime('%d/%m')}"
+            ),
+            width="stretch",
+        )
+
+        inicio_pagamento, fim_pagamento = ciclos_pagamento[indice_ciclo]
+
+        inicio_geral = inicio_pagamento
+        fim_geral = fim_pagamento
+
         st.success(
-            f"Período de pagamento ({DIA_PAGAMENTO}): "
+            f"Período de pagamento: "
             f"{inicio_geral.strftime('%d/%m/%Y')} até "
             f"{fim_geral.strftime('%d/%m/%Y')}"
         )
 
         pesquisa = st.text_input("Pesquisar funcionário")
 
+    pagamentos = calcular_pagamentos(
+        dados,
+        data_inicio_pagamento=inicio_pagamento,
+        data_fim_pagamento=fim_pagamento,
+    )
+
+    with col2:
         # ==================================================
         # EXPORTAR FOLHA DE PRESENÇA
         # ==================================================
@@ -138,7 +223,7 @@ if arquivo:
         )
 
         st.download_button(
-            "📄 Baixar folha de presença",
+            "Baixar folha de presença",
             data=arquivo_presenca,
             file_name=(
                 "presenca_"
@@ -149,12 +234,8 @@ if arquivo:
                 "application/vnd.openxmlformats-officedocument."
                 "spreadsheetml.sheet"
             ),
-            use_container_width=True,
-            help=(
-                f"Gera a planilha para impressão com {quantidade_ativos} "
-                "funcionário(s) que possuem marcações no período. "
-                "Marcações adicionadas manualmente aparecem em verde."
-            ),
+            type="primary",
+            use_container_width=False,
         )
 
         st.caption(
@@ -212,8 +293,10 @@ if arquivo:
             # ==================================================
             st.markdown("##### Inserir marcação")
 
-            col_data, col_hora, col_botao = st.columns(
-                [2, 2, 1],
+            # Campos compactos: data e horário ocupam aproximadamente
+            # um terço da largura que ocupavam anteriormente.
+            col_data, col_hora, col_botao, _ = st.columns(
+                [1, 1, 0.7, 4.3],
                 vertical_alignment="bottom"
             )
 
@@ -230,8 +313,10 @@ if arquivo:
                 )
 
             with col_hora:
-                hora_manual = st.time_input(
+                hora_manual_texto = st.text_input(
                     "Horário",
+                    value="00:00",
+                    placeholder="00:00",
                     key=f"hora_{chave_funcionario}"
                 )
 
@@ -239,21 +324,32 @@ if arquivo:
                 adicionar = st.button(
                     "Adicionar",
                     key=f"btn_{chave_funcionario}",
-                    use_container_width=True
+                    use_container_width=False
                 )
 
             if adicionar:
-                nova_marcacao = datetime.combine(
-                    data_manual,
-                    hora_manual
-                )
-
-                if nova_marcacao in todas_marcacoes:
-                    st.warning("Essa marcação já existe.")
+                try:
+                    hora_manual = datetime.strptime(
+                        hora_manual_texto.strip(),
+                        "%H:%M"
+                    ).time()
+                except ValueError:
+                    st.warning(
+                        "Horário inválido. Digite no formato HH:MM, "
+                        "por exemplo 08:00 ou 17:35."
+                    )
                 else:
-                    marcacoes_manuais_funcionario.append(nova_marcacao)
-                    marcacoes_manuais_funcionario.sort()
-                    st.rerun()
+                    nova_marcacao = datetime.combine(
+                        data_manual,
+                        hora_manual
+                    )
+
+                    if nova_marcacao in todas_marcacoes:
+                        st.warning("Essa marcação já existe.")
+                    else:
+                        marcacoes_manuais_funcionario.append(nova_marcacao)
+                        marcacoes_manuais_funcionario.sort()
+                        st.rerun()
 
             st.caption(
                 "Período de pagamento: "

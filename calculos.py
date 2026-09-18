@@ -37,6 +37,7 @@ ARTIGO_DIA_PAGAMENTO = (
     if DIA_PAGAMENTO in {"sabado", "domingo"}
     else "da"
 )
+NOME_DIA_PAGAMENTO = DIA_PAGAMENTO.capitalize()
 ROTULO_DIA_PAGAMENTO = f"{ARTIGO_DIA_PAGAMENTO} {DIA_PAGAMENTO}"
 
 
@@ -92,6 +93,123 @@ def converter_data_hora(data, hora):
     )
 
 
+
+
+def listar_dias_pagamento_no_periodo(data_inicio, data_fim):
+    """
+    Lista todos os dias configurados de pagamento que existem dentro
+    do período real da planilha.
+
+    O dia da semana usado é definido exclusivamente por DIA_PAGAMENTO.
+
+    Os dias anteriores ao primeiro dia de pagamento são ignorados
+    pelo filtro do app, porque não existe na base o ciclo anterior
+    necessário para fechá-los.
+    """
+
+    if isinstance(data_inicio, datetime):
+        data_inicio = data_inicio.date()
+
+    if isinstance(data_fim, datetime):
+        data_fim = data_fim.date()
+
+    if isinstance(data_inicio, str):
+        data_inicio = datetime.strptime(
+            data_inicio,
+            "%Y-%m-%d"
+        ).date()
+
+    if isinstance(data_fim, str):
+        data_fim = datetime.strptime(
+            data_fim,
+            "%Y-%m-%d"
+        ).date()
+
+    if data_fim < data_inicio:
+        return []
+
+    deslocamento = (
+        DIA_PAGAMENTO_NUMERO - data_inicio.weekday()
+    ) % 7
+
+    primeira_data_pagamento = data_inicio + timedelta(
+        days=deslocamento
+    )
+
+    datas_pagamento = []
+    data_atual = primeira_data_pagamento
+
+    while data_atual <= data_fim:
+        datas_pagamento.append(data_atual)
+        data_atual += timedelta(days=7)
+
+    return datas_pagamento
+
+
+def listar_ciclos_pagamento_no_periodo(data_inicio, data_fim):
+    """
+    Monta os ciclos válidos do filtro a partir do DIA_PAGAMENTO.
+
+    Regras:
+    - dias anteriores ao primeiro dia de pagamento existente na base
+      são ignorados;
+    - entre dias de pagamento, o ciclo é sempre um par fixo
+      (ex.: quinta -> quinta);
+    - se a base terminar depois do último dia de pagamento, o último
+      ciclo vai desse dia de pagamento até o último dia real da base.
+
+    Exemplos para DIA_PAGAMENTO = "quinta":
+    - base 11/09 -> 14/10:
+      17/09->24/09, 24/09->01/10, 01/10->08/10, 08/10->14/10
+    - base 27/08 -> 31/08:
+      27/08->31/08
+    """
+
+    if isinstance(data_inicio, datetime):
+        data_inicio = data_inicio.date()
+
+    if isinstance(data_fim, datetime):
+        data_fim = data_fim.date()
+
+    if isinstance(data_inicio, str):
+        data_inicio = datetime.strptime(
+            data_inicio,
+            "%Y-%m-%d"
+        ).date()
+
+    if isinstance(data_fim, str):
+        data_fim = datetime.strptime(
+            data_fim,
+            "%Y-%m-%d"
+        ).date()
+
+    if data_fim < data_inicio:
+        return []
+
+    dias_pagamento = listar_dias_pagamento_no_periodo(
+        data_inicio,
+        data_fim,
+    )
+
+    if not dias_pagamento:
+        return []
+
+    ciclos = []
+
+    for indice in range(len(dias_pagamento) - 1):
+        ciclos.append((
+            dias_pagamento[indice],
+            dias_pagamento[indice + 1],
+        ))
+
+    ultimo_dia_pagamento = dias_pagamento[-1]
+
+    if ultimo_dia_pagamento < data_fim:
+        ciclos.append((ultimo_dia_pagamento, data_fim))
+
+    return ciclos
+
+
 def calcular_periodo_pagamento(data_referencia):
     """
     Retorna o período padrão do pagamento.
@@ -105,10 +223,6 @@ def calcular_periodo_pagamento(data_referencia):
     - depois do dia de pagamento: mantém fechado o período que acabou
       no dia de pagamento daquela semana.
 
-    Exemplo com DIA_PAGAMENTO = quinta:
-    - quarta 12/08 -> 06/08 até 12/08
-    - quinta 13/08 -> 06/08 até 13/08
-    - sábado 15/08 -> 06/08 até 13/08
     """
 
     if isinstance(data_referencia, datetime):
@@ -242,11 +356,11 @@ def calcular_jornadas(
       (8h55 já conta 1h extra, 9h55 conta 2h, etc.);
     - no primeiro dia do ciclo, a diária já foi paga e entram somente
       as horas extras confirmadas;
-    - na quinta final do ciclo, somente a primeira marcação gera o
+    - no dia final do ciclo, somente a primeira marcação gera o
       adiantamento de R$ 110, mesmo que existam outras marcações;
     - nos demais dias, exatamente uma marcação dentro do ciclo gera
       adiantamento de R$ 110;
-    - fora da quinta final, duas ou mais marcações no mesmo dia formam
+    - fora do dia final, duas ou mais marcações no mesmo dia formam
       uma jornada da primeira até a última marcação daquele dia.
     """
 
@@ -282,11 +396,11 @@ def calcular_jornadas(
             and data == data_fim_pagamento
         )
 
-        # Na quinta ATUAL do pagamento, a diária é adiantada no momento
+        # No dia ATUAL de pagamento, a diária é adiantada no momento
         # da primeira marcação. Mesmo que a saída (ou outras marcações) já
         # esteja presente no relatório, ela NÃO entra no pagamento atual.
-        # A jornada completa dessa quinta será apurada no próximo ciclo,
-        # quando esta data passar a ser a quinta inicial; nesse momento,
+        # A jornada completa desse dia será apurada no próximo ciclo,
+        # quando esta data passar a ser o início do próximo ciclo; nesse momento,
         # entram apenas as horas extras pendentes, pois a diária já foi paga.
         if dentro_ciclo_pagamento and eh_dia_pagamento and eh_fim_do_ciclo:
             jornadas.append({
